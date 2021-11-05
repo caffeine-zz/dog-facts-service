@@ -1,0 +1,85 @@
+def SERVICE = "dog-facts-service"
+def BRANCH = "main"
+
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: docker
+    image: docker:dind
+    securityContext:
+      privileged: true
+'''
+            defaultContainer 'docker'
+        }
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout(
+                changelog: false,
+                poll: false,
+                scm: [
+                    $class: 'GitSCM',
+                    branches: [[ name: "*/${BRANCH}" ]],
+                    doGenerateSubmoduleConfigurations: false,
+                    extensions: [],
+                    submoduleCfg: [],
+                    userRemoteConfigs: [[
+                        url: "https://github.com/caffeine-zz/${SERVICE}.git"
+                    ]]
+                    ]
+                )
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                sh "docker build . -t caffeinezz/${SERVICE}:${BUILD_NUMBER}"
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh """
+                docker run --rm --name app -d -p 5000:5000 caffeinezz/${SERVICE}:${BUILD_NUMBER}
+                sleep 10
+                """
+                sh """
+                apk update
+                apk add curl
+                """
+                script {
+                    appUrl = '127.0.0.1:5000'
+                    httpStatus = sh(script: "curl -s --max-time 5 --insecure -w '%{http_code}' \
+                        ${appUrl} -o /dev/null", returnStdout: true)
+                    
+                        if (httpStatus != "200" && httpStatus != "201" ) {
+                            echo "Service error with status code = ${httpStatus} when calling ${appUrl}"
+                            sh "exit 1"
+                        } else {
+                            responseBody = sh(script: "curl -s ${appUrl}", returnStdout: true)
+                            echo "Service OK with status: ${httpStatus}"
+                            echo "Service response: ${responseBody}"
+                        }
+                }
+            }
+        }
+        
+        stage('Push') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub',
+                  usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                sh """
+                docker login -u $USERNAME -p $PASSWORD
+                docker push caffeinezz/${SERVICE}:${BUILD_NUMBER}
+                """
+                }
+            }
+        }
+    }
+}
